@@ -15,6 +15,7 @@
 #include "structures.h"
 #include "serialize.h"
 #include "procedures.h"
+#include "net.h"
 
 int client_states[MAX_PLAYERS * 2];
 
@@ -201,13 +202,8 @@ void disconnectClient (int *client_fd, int cause) {
   client_count --;
   setClientState(*client_fd, STATE_NONE);
   handlePlayerDisconnect(*client_fd);
-  #ifdef _WIN32
-  closesocket(*client_fd);
-  printf("Disconnected client %d, cause: %d, errno: %d\n", *client_fd, cause, WSAGetLastError());
-  #else
-  close(*client_fd);
+  net_close(*client_fd);
   printf("Disconnected client %d, cause: %d, errno: %d\n\n", *client_fd, cause, errno);
-  #endif
   *client_fd = -1;
 }
 

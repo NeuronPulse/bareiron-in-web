@@ -1,53 +1,128 @@
-# bareiron
-Minimalist Minecraft server for memory-restrictive embedded systems.
+# bareiron in web
 
-The goal of this project is to enable hosting Minecraft servers on very weak devices, such as the ESP32. The project's priorities are, in order: **memory usage**, **performance**, and **features**. Because of this, compliance with vanilla Minecraft is not guaranteed, nor is it a goal of the project.
+把纯 C 的 Minecraft 服务器 [`bareiron`](https://github.com/p2r3/bareiron) 编译为 **WebAssembly**，直接在**浏览器**里运行一个可被外部 Minecraft 客户端连接的服务器；并通过 **`tailscale-web`** 在浏览器内直接运行一个 **Tailscale 节点** 来接收连接——**全程不需要你自建任何中继服务器**。
 
-- Minecraft version: `1.21.8`
-- Protocol version: `772`
+> 上游 `bareiron` 是一个面向内存受限嵌入式设备（如 ESP32）的极简 Minecraft 1.21.8（协议 772）服务器。本项目复用其 C 核心，仅替换网络层与运行环境。
 
-> [!WARNING]
-> Currently, only the vanilla client is officially supported. Issues have been reported when using Fabric or similar.
+---
 
-## Quick start
-For PC x86_64 platforms, grab the [latest build binary](https://github.com/p2r3/bareiron/releases/download/latest/bareiron.exe) and run it. The file is a [Cosmopolitan polyglot](https://github.com/jart/cosmopolitan), which means it'll run on Windows, Linux, and possibly Mac, despite the file extension. Note that the server's default settings cannot be reconfigured without compiling from source.
+## 架构
 
-For microcontrollers, see the section on **compilation** below.
+```
+Minecraft 客户端（在 tailnet 上）
+        │ TCP 25565
+        ▼
+浏览器内的 Tailscale 节点（tailscale-web，WASM）
+        │ listenTCP(25565)
+        ▼
+bareiron (C→WASM + Asyncify)  ← 真正的 Minecraft 服务器，跑在浏览器里
+```
 
-## Compilation
-Before compiling, you'll need to dump registry data from a vanilla Minecraft server. On Linux, this can be done automatically using the `extract_registries.sh` script. Otherwise, the manual process is as follows: create a folder called `notchian` here, and put a Minecraft server JAR in it. Then, follow [this guide](https://minecraft.wiki/w/Minecraft_Wiki:Projects/wiki.vg_merge/Data_Generators) to dump all of the registries (use the _second_ command with the `--all` flag). Finally, run `build_registries.js` with either [bun](https://bun.sh/), [node](https://nodejs.org/en/download), or [deno](https://docs.deno.com/runtime/getting_started/installation/).
+- **bareiron 核心**：C 代码用 Emscripten 编译为 WASM，网络通过 `EM_JS` 桥接层（`src/web/bridge.js`）交给 JS。
+- **网络（无中继）**：浏览器以 WASM 直接运行 Tailscale 设备（[`tailscale-web`](https://github.com/adrianosela/tailscale-web)），拿到 `100.x` 的 tailnet IP 并 `listenTCP(25565)`。同 tailnet 的朋友用原生 Minecraft Java 版（1.21.8）直连 `<浏览器节点IP>:25565`；数据面走 Tailscale 自己的 DERP-over-WSS，**不经过你自建的服务器**。
+- **面板**：`src/web/` 下的 GitHub 风格、中英双语控制台（左侧栏 + 内容列 + 底部命令栏），展示实时日志、在线玩家/连接、运行状态，并负责触发 Tailscale 登录。
 
-- To compile on Linux, install `gcc` and run `./build.sh`.
-- For compiling on Windows, there are a few options:
-  - To compile a native Windows binary: install [MSYS2](https://www.msys2.org/) and open the "MSYS2 MINGW64" shell. From there, run `pacman -Sy mingw-w64-x86_64-gcc`, navigate to this project's directory, and run `./build.sh`.
-  - To compile a native 32-bit binary (compatible with Windows 95/98, but why would you ever want that), use the same steps above, except with `pacman -Sy mingw-w64-cross-gcc` and `./build.sh --9x`.
-  - To compile a MSYS2-linked binary: install [MSYS2](https://www.msys2.org/), and open the "MSYS2 MSYS" shell. From there, install `gcc` (run `pacman -Sy gcc`), navigate to this project's directory and run `./build.sh`. 
-  - To compile and run a Linux binary from Windows: install WSL, and from there install `gcc` and run `./build.sh` in this project's directory.
-- To target an ESP variant, set up a PlatformIO project (select the ESP-IDF framework, **not Arduino**) and clone this repository on top of it. See **Configuration** below for further steps. For better performance, consider changing the clock speed and enabling compiler optimizations. If you don't know how to do this, there are plenty of resources online.
+---
 
-## Configuration
-Configuring the server requires compiling it from its source code as described in the section above.
+## 构建 WASM
 
-Most user-friendly configuration options are available in `include/globals.h`, including WiFi credentials for embedded setups. Some other details, like the MOTD or starting time of day, can be found in `src/globals.c`. For everything else, you'll have to dig through the code.
+需要 [Emscripten](https://emscripten.org/)：
 
-Here's a summary of some of the more important yet less trivial options for those who plan to use this on a real microcontroller with real players:
+```bash
+cd src/web
+./build_wasm.sh        # 产出 dist/bareiron.js + dist/bareiron.wasm
+```
 
-- Depending on the player count, the performance of the MCU, and the bandwidth of your network, player position broadcasting could potentially throttle your connection. If you find this to be the case, try commenting out `BROADCAST_ALL_MOVEMENT` and `SCALE_MOVEMENT_UPDATES_TO_PLAYER_COUNT`. This will tie movement to the tickrate. If this change makes movement too choppy, you can decrease `TIME_BETWEEN_TICKS` at the cost of more compute.
-- If you experience crashes or instability related to chests or water, those features can be disabled with `ALLOW_CHESTS` and `DO_FLUID_FLOW`, respectively.
-- If you find frequent repeated chunk generation to choke the server, increasing `VISITED_HISTORY` might help. There isn't _that_ much of a memory footprint for this - increasing it to `64` for example would only take up 240 extra bytes per allocated player.
+（C 核心的编译/注册表导出等沿用上游 `build.sh` / `extract_registries.sh` / `build_registries.js`，详见上游 README。）
 
-## Non-volatile storage (optional)
-This section applies to those who target ESP variants and wish to persist world data after a shutdown. *This is not necessary on PC platforms*, as world and player data is written to `world.bin` by default.
+---
 
-The simplest way to accomplish this is to set up LittleFS in PlatformIO and comment out the `#ifndef` surrounding `SYNC_WORLD_TO_DISK` in `globals.h`. Since flash writes are typically slow and blocking, you'll likely want to uncomment `DISK_SYNC_BLOCKS_ON_INTERVAL`. Depending on the flash size of your board, you may also have to decrease `MAX_BLOCK_CHANGES`, so that the world data fits in your LittleFS partition.
+## 运行面板
 
-If using an SD card module or other virtual file system, you'll have to implement the filesystem setup routine on your own. The built-in serializer should still work though, as it uses POSIX filesystem calls.
+面板只需一个静态文件服务器（`src/web/serve.js`，基于 Node，默认端口 8090）：
 
-Alternatively, if you can't set up a file system, you can dump and upload world data over TCP. This can be enabled by uncommenting `DEV_ENABLE_BEEF_DUMPS` in `globals.h`. *Note: this system implements no security or authentication.* With this option enabled, anyone with access to the server can upload arbitrary world data.
+```bash
+cd src/web
+bash deploy.sh                 # 自动取本机 tailnet IP 并启动 serve.js（可选绑定）
+# 或本机直接：
+node serve.js 8090             # 浏览器打开 http://127.0.0.1:8090/
+```
 
-## Contribution
-- Create issues and discuss with the maintainer(s) before making pull requests. Even for small changes.
-- Follow the existing code style. Ensure that your changes fit in with the surrounding code, even if you disagree with the style. Pull requests with inconsistent style will be nitpicked.
-- Test your code before creating a pull request or requesting a review, regardless of how "simple" your change is. It's a basic form of respect towards the maintainer and reviewer.
-- Development tooling and compilation improvements _are not welcome,_ unless you've worked with the codebase long enough to have noticed practical shortcomings in that area. Adding a single compiler flag is not a meaningful first contribution.
-- For information on the Minecraft server protocol, [refer to the wiki](https://minecraft.wiki/w/Java_Edition_protocol/Packets). For everything else, use a [search engine](https://google.com).
+`deploy.sh` 仅托管 Web 面板。中继（`relay.js`）**已不再是必需组件**，保留仅作可选回退。
+
+### 使用步骤
+
+1. 浏览器打开面板（本机可用 `http://127.0.0.1:8090/`，或部署机上用其 tailnet IP）。
+2. 点击 **“连接 Tailscale 并启动”**：面板会按需从 `esm.sh` 动态加载 `tailscale-web`（约 35MB，首次较慢），并弹出 **Tailscale 登录链接**。
+3. 在新标签页完成 OAuth 登录（用你拥有该 tailnet 的账号）。登录后浏览器内节点拿到 `100.x` IP 并开始监听 `25565`。
+4. 面板显示 **“朋友连接地址 = <100.x IP>:25565”**。把该地址发给同在 tailnet 的朋友，用原生 Minecraft(Java 1.21.8) 直连即可。
+
+---
+
+## 目录结构
+
+```
+src/web/
+├── index.html        # GitHub 风格、中英双语控制台页面
+├── styles.css        # 设计语言（亮/暗主题，CSS 变量）
+├── app.js            # ES module：UI 逻辑 + Tailscale 启动 + 实时刷新
+├── bridge.js         # JS 桥接层：RelayBackend(可选回退) + TailscaleBackend
+├── serve.js          # 静态文件服务器（托管面板）
+├── relay.js          # 可选回退：纯 Node TCP↔WS 中继（本项目默认不用）
+├── deploy.sh         # 一键启动面板
+└── dist/             # 编译产物 bareiron.{js,wasm}
+```
+
+---
+
+## 控制台功能
+
+- **概览**：在线玩家数 / 运行时长 / 累计连接 / 总流量 / 世界种子（Hero 卡片），快速操作（启动、停止、复制地址、清空日志），实时控制台（bareiron 的 stdout）。
+- **玩家 / 连接**：浏览器内 Tailscale 节点的实时连接（地址、在线时长、流量），昵称取自服务器日志。
+- **运行状态**：版本、端口、传输方式、tailnet IP、种子、累计连接、流量、健康度。
+- **Tailscale**：登录状态、朋友连接地址、本节点 tailnet IP。
+- **世界 / 关于**：版本信息、持久化（IDBFS，浏览器内）。
+- **语言**：侧栏底部可切换 **中文 / English**，所有界面文案与提示实时切换（偏好存入 `localStorage`）。
+
+> 说明：当前构建未实现浏览器内控制台输入（RCON）。启动后请使用原生 Minecraft 客户端连入；底部命令栏仅作界面演示。
+
+---
+
+## 已知约束 / 备注
+
+- `tailscale-web` 经 `https://esm.sh/tailscale-web` 加载（首次约 35MB）。若网络无法访问 esm.sh，可在 `app.js` 顶部修改 `TS_MODULE_URL`，或自托管该 wasm。
+- 浏览器内 Tailscale 走交互式 OAuth（登录拥有 tailnet 的账号），不使用设备接入密钥（authkey）。
+- 浏览器无法做 UDP，数据面经 Tailscale 的 DERP-over-WSS（Tailscale 自有基础设施），延迟高于纯 P2P，但功能完整且无需自建中继。
+- 单实例：停止后需刷新页面重新加载（当前 WASM 构建为单例）。
+- ⚠️ **实测结论（2026-10-02）**：浏览器内 Tailscale 的 WASM **已确认能加载并启动**（日志 `WASM ready` → `Engine created` → 节点进入 `NeedsLogin`）。此前登录页不弹出的根因是**面板以 HTTP 不安全上下文提供**——`tailscale-web` 做 Noise 握手依赖 `crypto.subtle`，而该 API 仅在安全上下文（HTTPS）可用，于是控制平面 `wss://controlplane.tailscale.com/ts2021` 握手即断。改为 HTTPS（如 GitHub Pages）即可。
+- **部署即修复**：见下方“部署 / GitHub Pages”。仓库已含 `.github/workflows/deploy.yml`，推送 `main` 即构建并发布到 GH Pages（`https://<user>.github.io/<repo>/`），自动获得安全上下文，`tailscale-web` 可正常工作。
+- **可选：自建控制平面**：`tailscale-web` 支持 `network.init({ controlUrl })` 指向自建 **Headscale**。在面板地址后加 `?controlUrl=https://你的-headscale` 再点“连接并启动”即可；仅在你确有需要时使用。
+
+## Tailscale 登录失败排查
+
+- 控制台出现 `WebSocket ... controlplane.tailscale.com ... failed` → 浏览器连不上 Tailscale 控制平面（网络封锁/代理）。先在浏览器里直接打开 `https://login.tailscale.com` 验证。
+- 解决：① 本机用 VPN/代理使浏览器能直连 Tailscale；或 ② 自建 Headscale 并用 `?controlUrl=` 指向它。
+- `onAuthRequired(url)` 被触发时，面板会自动 `window.open` 登录页并同时在“Tailscale”视图给出可点击链接。
+- 若 `tailscale-web` 经 `esm.sh` 加载失败，可在 `app.js` 顶部改 `TS_MODULE_URL`，或自托管该 wasm。
+
+---
+
+## 部署 / GitHub Pages
+
+面板是纯静态文件（`src/web/`：`index.html`、`app.js`、`bridge.js`、`styles.css`、`dist/bareiron.{js,wasm}`）。`tailscale-web` 运行时从 `esm.sh` 动态加载，无需打包。
+
+因 `tailscale-web` 需要 **HTTPS 安全上下文**，请通过 GitHub Pages 提供（不要用 `http://localhost` 或 `http://<IP>` 直接打开）：
+
+1. 推送 `main` 触发 `.github/workflows/deploy.yml`，它会把 `src/web` 发布到 GitHub Pages。
+2. 仓库 **Settings → Pages → Source** 选择 **GitHub Actions**。
+3. 稍候片刻，访问 `https://<user>.github.io/<repo>/`，点 “Connect Tailscale & start”，在弹出的 Tailscale 登录页完成 OAuth 即可。
+4. 登录后页面显示本节点 `100.x` IP；朋友用 Minecraft(Java 1.21.8) 直连 `<100.x IP>:25565`（须同在 tailnet）。
+
+> 本地想用 HTTPS 自测：`node src/web/serve.js 8090 --https`（需 `certs/` 下的证书）。
+
+---
+
+## 致谢
+
+- 服务器核心：[`bareiron`](https://github.com/p2r3/bareiron)（p2r3）。
+- 浏览器内 Tailscale 节点：[`tailscale-web`](https://github.com/adrianosela/tailscale-web)（adrianosela）。

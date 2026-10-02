@@ -25,6 +25,7 @@
 #include "varnum.h"
 #include "procedures.h"
 #include "tools.h"
+#include "net.h"
 
 #ifndef htonll
   static uint64_t htonll (uint64_t value) {
@@ -51,7 +52,7 @@ ssize_t recv_all (int client_fd, void *buf, size_t n, uint8_t require_first) {
 
   // If requested, exit early when first byte not immediately available
   if (require_first) {
-    ssize_t r = recv(client_fd, p, 1, MSG_PEEK);
+    ssize_t r = net_recv(client_fd, p, 1, NET_PEEK);
     if (r <= 0) {
       if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
         return 0; // no first byte available yet
@@ -62,7 +63,7 @@ ssize_t recv_all (int client_fd, void *buf, size_t n, uint8_t require_first) {
 
   // Busy-wait (with task yielding) until we get exactly n bytes
   while (total < n) {
-    ssize_t r = recv(client_fd, p + total, n - total, 0);
+    ssize_t r = net_recv(client_fd, p + total, n - total, 0);
     if (r < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
         // handle network timeout
@@ -100,11 +101,7 @@ ssize_t send_all (int client_fd, const void *buf, ssize_t len) {
 
   // Busy-wait (with task yielding) until all data has been sent
   while (sent < len) {
-    #ifdef _WIN32
-      ssize_t n = send(client_fd, p + sent, len - sent, 0);
-    #else
-      ssize_t n = send(client_fd, p + sent, len - sent, MSG_NOSIGNAL);
-    #endif
+    ssize_t n = net_send(client_fd, p + sent, len - sent, 0);
     if (n > 0) { // some data was sent, log it
       sent += n;
       last_update_time = get_program_time();

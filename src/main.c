@@ -39,6 +39,7 @@
 #include "registries.h"
 #include "procedures.h"
 #include "serialize.h"
+#include "net.h"
 
 /**
  * Routes an incoming packet to its packet handler or procedure.
@@ -531,57 +532,14 @@ int main () {
     player_data[i].client_fd = -1;
   }
 
-  // Create server TCP socket
-  int server_fd, opt = 1;
-  struct sockaddr_in server_addr, client_addr;
-  socklen_t addr_len = sizeof(client_addr);
-
-  server_fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (server_fd == -1) {
-    perror("socket failed");
-    exit(EXIT_FAILURE);
-  }
-#ifdef _WIN32
-  if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR,
-      (const char*)&opt, sizeof(opt)) < 0) {
-#else
-  if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-#endif    
-    perror("socket options failed");
-    exit(EXIT_FAILURE);
-  }
-
-  // Bind socket to IP/port
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_addr.s_addr = INADDR_ANY;
-  server_addr.sin_port = htons(PORT);
-
-  if (bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-    perror("bind failed");
-    close(server_fd);
-    exit(EXIT_FAILURE);
-  }
-
-  // Listen for incoming connections
-  if (listen(server_fd, 5) < 0) {
-    perror("listen failed");
-    close(server_fd);
+  // Create and start the listening transport. On native/ESP builds this sets
+  // up a real TCP socket; on WASM it hands off to the Tailscale netstack via
+  // the JS bridge. The listener handle is kept internal to the net_* layer.
+  if (net_init(PORT)) {
+    fprintf(stderr, "Failed to start listener on port %d\n", PORT);
     exit(EXIT_FAILURE);
   }
   printf("Server listening on port %d...\n", PORT);
-
-  // Make the socket non-blocking
-  // This is necessary to not starve the idle task during slow connections
-  #ifdef _WIN32
-    u_long mode = 1;  // 1 = non-blocking
-    if (ioctlsocket(server_fd, FIONBIO, &mode) != 0) {
-      fprintf(stderr, "Failed to set non-blocking mode\n");
-      exit(EXIT_FAILURE);
-    }
-  #else
-  int flags = fcntl(server_fd, F_GETFL, 0);
-  fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
-  #endif
 
   // Track time of last server tick (in microseconds)
   int64_t last_tick_time = get_program_time();
@@ -592,23 +550,23 @@ int main () {
    * client connection.
    */
   while (true) {
-    // Check if it's time to yield to the idle task
-    task_yield();
+    // In the WASM build, only suspend (via net_poll) when there is no work
+    // pending; otherwise keep scanning immediately so a single client is
+    // served without stalling on each empty poll slot. Native builds just
+    // yield to the idle task (or busy-loop).
+    #ifdef WASM
+      if (!net_any_pending()) net_poll(200000);
+    #else
+      task_yield();
+    #endif
 
     // Attempt to accept a new connection
     for (int i = 0; i < MAX_PLAYERS; i ++) {
       if (clients[i] != -1) continue;
-      clients[i] = accept(server_fd, (struct sockaddr *)&client_addr, &addr_len);
-      // If the accept was successful, make the client non-blocking too
+      clients[i] = net_accept();
+      // If the accept was successful, count the new client
       if (clients[i] != -1) {
-        printf("New client, fd: %d\n", clients[i]);
-      #ifdef _WIN32
-        u_long mode = 1;
-        ioctlsocket(clients[i], FIONBIO, &mode);
-      #else
-        int flags = fcntl(clients[i], F_GETFL, 0);
-        fcntl(clients[i], F_SETFL, flags | O_NONBLOCK);
-      #endif
+        printf("New client, handle: %d\n", clients[i]);
         client_count ++;
       }
       break;
@@ -631,7 +589,7 @@ int main () {
 
     // Check if at least 2 bytes are available for reading
     #ifdef _WIN32
-    recv_count = recv(client_fd, recv_buffer, 2, MSG_PEEK);
+    recv_count = net_recv(client_fd, recv_buffer, 2, NET_PEEK);
     if (recv_count == 0) {
       disconnectClient(&clients[client_index], 1);
       continue;
@@ -646,7 +604,7 @@ int main () {
       }
     }
     #else
-    recv_count = recv(client_fd, &recv_buffer, 2, MSG_PEEK);
+    recv_count = net_recv(client_fd, recv_buffer, 2, NET_PEEK);
     if (recv_count < 2) {
       if (recv_count == 0 || (recv_count < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
         disconnectClient(&clients[client_index], 1);
@@ -663,7 +621,7 @@ int main () {
       send_all(client_fd, block_changes, sizeof(block_changes));
       send_all(client_fd, player_data, sizeof(player_data));
       // Flush the socket and receive everything left on the wire
-      shutdown(client_fd, SHUT_WR);
+      net_shutdown(client_fd);
       recv_all(client_fd, recv_buffer, sizeof(recv_buffer), false);
       // Kick the client
       disconnectClient(&clients[client_index], 6);
@@ -719,8 +677,6 @@ int main () {
 
   }
 
-  close(server_fd);
- 
   #ifdef _WIN32 //cleanup windows socket
     WSACleanup();
   #endif

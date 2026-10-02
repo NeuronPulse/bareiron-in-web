@@ -8,6 +8,8 @@
   #define WIFI_SSID "your-ssid"
   #define WIFI_PASS "your-password"
   void task_yield ();
+#elif defined(WASM)
+  void task_yield ();
 #else
   #define task_yield();
 #endif

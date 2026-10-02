@@ -5,3 +5,7 @@ bareiron.exe
 src/registries.c
 include/registries.h
 *.bin
+
+# 本地敏感凭据（切勿提交）
+.codebuddy/memory/ts_api_key.txt
+.codebuddy/memory/ts_auth_key.txt
